@@ -31,7 +31,6 @@ preferences {
     section('Brighten:') {
         input 'theDimmers', 'capability.switchLevel', required: true, multiple: true, title: 'Which dimmable switches?'
         input 'brightLevel', 'number', required: true, defaultValue: 100, range: 0..100, title: 'Brighten to what level?'
-        input 'brightenRate', 'number', required: true, defaultValue: 100, range: 0..9, title: 'At what rate?'
     }
     section('Brighten even if off?') {
     	input 'evenIfOff', 'boolean', defaultValue: false
@@ -47,75 +46,83 @@ def installed() {
 
 def updated() {
 	unsubscribe()
+    unschedule()
 	initialize()
 }
 
 def initialize() {
 	state.inactivityThreshold = 1000 * 60 * inactivityLength // inactivityLength is in Minutes   
     
-    subscribe(theMotion, 'motion.active', motionActionHandler)
-    subscribe(theMotion, 'motion.inactive', motionInactionHandler)
+    if (theDimmers != null && theDimmers != "") {
+        subscribe(theMotion, 'motion.active', motionActionHandler)
+        subscribe(theMotion, 'motion.inactive', motionInactionHandler)
+    }
 }
 
 def motionActionHandler(evt) {
-    log.debug "motionActionHandler called to set lights to ${settings.brightLevel}"
+    log.debug "motionActionHandler called (set lights to ${settings.brightLevel})"
     
-    if (state.brightened == true) {
-    	log.debug '  lights are already brightened'
-    } else {
-		def levels = [:]
-    
-    	for (def i = 0; i < settings.theDimmers.size(); i++) {
-        	log.debug "  looking at dimmer #${i}"
-    		def light = settings.theDimmers[i]
-            def level = light.level.toInteger()
-            log.debug "  ...is at ${level}"
-            
-            if (light != null && ((settings.evenIfOff == true || level != 0) && level < settings.brightLevel)) {
-    			levels.put(i, settings.theDimmers[i].level)
-                light.setLevel(settings.brightLevel, settings.brightenRate)
-                state.brightened = true
-            }
-        }
-        
-    	state.previousLevels = levels;
+    if (state.brightened != true) {
+    	brightenAllLights()
     }
 }
 
 def motionInactionHandler(evt) {
-	//if (state.brightened) {
-    	runIn(60 * inactivityLength, dimIfInactive)
-    //}
+    log.debug "scheduling dimIfInactive() in ${inactivityLength} minutes (${60 * inactivityLength} seconds)"
+    
+    runIn(60 * inactivityLength, dimIfInactive)
+}
+
+def brightenAllLights() {
+	log.debug "brightenAllLights()  evenIfOff=${evenIfOff}"
+
+	def originalLevels = new int[theDimmers?.size()]
+    def i = 0
+    for (dimmer in theDimmers) {
+    	def currLvl = dimmer.currentLevel
+        if (currLvl == null) {
+        	currLvl = 0
+        }
+        
+        originalLevels[i] = currLvl
+        log.debug "  ${i}	current=${currLvl} to=${brightLevel}"
+
+		if (currLvl != 0 || evenIfOff == "true") {
+            if (currLvl < brightLevel) {
+                log.debug "setting level of light #${i} to ${brightLevel}"
+                dimmer.setLevel(brightLevel)
+            }
+        }
+        
+        i++
+    }
+    
+    state.originalLevels = originalLevels
+    state.brightened = true
 }
 
 def dimIfInactive() {
-	log.debug 'dimIfInactive called'
-    
     def motionState = settings.theMotion.currentState('motion')
     
     if (motionState.value == 'inactive') {
     	def elapsedSinceActive = now() - motionState.date.time
         
-        if (elapsed >= state.threshold) {
-        	log.debug "  will dim the lights back to their previous level"
-            dimBackToPrevious()
-        } else {
-        	log.debug "  motion was active ${elapsed / 1000} sec ago (within threshold)"
-            // todo: reschedule?
+        if (elapsedSinceActive >= state.inactivityThreshold) {
+            lightsToOriginalState()
         }
     }    
 }
 
-def dimBackToPrevious() {
-    for (i = 0; i < settings.theDimmers.size(); i++) {
-    	def previousLevel = state.previousLevels[i]
-        def light = settings.theDimmers[i]
-        
-        if (previousLevel != null && light != null) {            
-            if (light.level > previousLevel) {
-            	light.setLevel(previousLevel, settings.brightenRate)
-            }            
+def lightsToOriginalState() {
+	log.debug "lightsToOriginalState()"
+
+	def originalLevels = state.originalLevels
+    def i = 0
+    for (dimmer in theDimmers) {
+    	if (i < originalLevels.size()) {
+    		dimmer.setLevel(originalLevels[i])
         }
+        i++
     }
     
     state.brightened = false
